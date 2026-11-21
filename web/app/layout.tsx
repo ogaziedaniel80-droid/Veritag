@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Navbar } from "@/components/Navbar";
+import { I18nProvider } from "@/lib/i18n";
 import { WalletProvider } from "@/lib/wallet-context";
 import "./globals.css";
 
@@ -13,14 +14,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="min-h-screen flex flex-col">
-        <WalletProvider>
-          <Navbar />
-          <main className="flex-1">{children}</main>
-          <footer className="border-t border-slate-200 bg-white py-6 text-center text-xs text-slate-500">
-            Veritag · Powered by Stellar Soroban · Chain-anchored authenticity &amp; transferable
-            warranties
-          </footer>
-        </WalletProvider>
+        <I18nProvider>
+          <WalletProvider>
+            <Navbar />
+            <main className="flex-1">{children}</main>
+            <footer className="border-t border-slate-200 bg-white py-6 text-center text-xs text-slate-500">
+              Veritag · Powered by Stellar Soroban · Chain-anchored authenticity &amp; transferable
+              warranties
+            </footer>
+          </WalletProvider>
+        </I18nProvider>
       </body>
     </html>
   );

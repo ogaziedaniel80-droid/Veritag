@@ -1,31 +1,25 @@
+// @vitest-environment jsdom
 import { Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import axe from "axe-core";
+import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  detectTorchCapability,
-  filterVideoInputDevices,
-  formatCameraError,
-} from "../components/QrScanner.js";
-import { sortTimelineEvents } from "../components/ProvenanceTimeline.js";
-import {
-  isScanMuted,
-  playScanSuccessFeedback,
-  setScanMuted,
-  toggleScanMuted,
-} from "../lib/feedback.js";
+  buildCertificatePdfBytes,
+  buildCertificateSvg,
+} from "../lib/certificate-generator.js";
 import { registerPasskeySmartWallet } from "../lib/passkey.js";
 import {
   buildUnsignedRegistryTxXdr,
+  detectInstalledWallets,
   getFileDownloadUrl,
+  isValidGtinFormat,
   PUBLIC_CONFIG,
+  resolveGs1DigitalLink,
   signRegistryTxWithSecret,
   verifyProduct,
 } from "../lib/stellar.js";
-import type { UnitTimelineEvent } from "../lib/stellar.js";
-
-// Mock next/navigation so QrScanner helpers can be imported without a Next.js runtime
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
-}));
+import { dispatchWalletConnection, type WalletSession } from "../lib/wallet-context.js";
 
 describe("@veritag/web verification & passkey wallet logic", () => {
   beforeEach(() => {
@@ -36,6 +30,7 @@ describe("@veritag/web verification & passkey wallet logic", () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.unstubAllGlobals();
   });
 
@@ -87,6 +82,205 @@ describe("@veritag/web verification & passkey wallet logic", () => {
       method: "activate",
     });
     expect(passkeyUnsignedXdr.length).toBeGreaterThan(20);
+  });
+
+  it("generates Guilloche SVG and vector PDF warranty certificates", () => {
+    const certData = {
+      unitId: "55aa66bb77cc88dd99ee00ff112233445566778899aabbccddeeff0011223344",
+      model: "Chronos Titan Automatic 41mm",
+      serial: "CH-2026-ACTIVE-04",
+      brandDomain: "chronos-watches.swiss",
+      ownerAddress: "GB7TAYRUZGE6TVT7NHP5SMIZRNQA6PLM423EYISAOAP3MKYIQMVYP2JO",
+      txHash: "4e9b2f7a1c8d3065a2b4c6d8e0f123456789abcdef0123456789abcdef012345",
+      expiresAt: "2028-08-15",
+      warrantyDaysRemaining: 630,
+      claimsUsed: 1,
+    };
+
+    const svg = buildCertificateSvg(certData);
+    expect(svg).toContain("<svg");
+    expect(svg).toContain("Certificate of Authenticity &amp; Warranty");
+    expect(svg).toContain(certData.ownerAddress);
+    expect(svg).toContain(certData.txHash);
+    expect(svg).toContain(certData.expiresAt);
+    expect(svg).toContain("<path d=");
+
+    const pdfBytes = buildCertificatePdfBytes(certData);
+    const pdfText = new TextDecoder().decode(pdfBytes);
+    expect(pdfText.startsWith("%PDF-1.4")).toBe(true);
+    expect(pdfText.trimEnd().endsWith("%%EOF")).toBe(true);
+    expect(pdfText).toContain(certData.ownerAddress);
+    expect(pdfText).toContain(certData.txHash);
+    expect(pdfText).toContain(certData.expiresAt);
+  });
+
+  it("resolves GS1 Digital Link GTIN/serial paths and rejects invalid GTINs", async () => {
+    expect(isValidGtinFormat("01234567890128")).toBe(true);
+    expect(isValidGtinFormat("12345678")).toBe(true);
+    expect(isValidGtinFormat("INVALID-GTIN")).toBe(false);
+
+    const invalid = await resolveGs1DigitalLink("ABC", "CH-2026-000101");
+    expect(invalid).toBeNull();
+
+    const fallbackResolved = await resolveGs1DigitalLink("01234567890128", "CH-2026-000101");
+    expect(fallbackResolved).not.toBeNull();
+    expect(fallbackResolved?.source).toBe("demo-fallback");
+    expect(fallbackResolved?.redirectPath).toContain("/v/");
+    expect(fallbackResolved?.redirectPath).toContain("/CH-2026-000101");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          brandAddress: "GABC1234567890BRAND",
+          brandDomain: "atelier.example",
+          batchId: "batch-999",
+        }),
+      }),
+    );
+
+    const apiResolved = await resolveGs1DigitalLink("01234567890128", "SER-42");
+    expect(apiResolved?.source).toBe("api");
+    expect(apiResolved?.brandDomain).toBe("atelier.example");
+    expect(apiResolved?.redirectPath).toBe("/v/GABC1234567890BRAND/batch-999/SER-42");
+  });
+});
+
+describe("#100 ThemeToggle & theme persistence", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("persists theme selection to localStorage across light, dark, and system modes", async () => {
+    render(
+      React.createElement(
+        AppThemeProvider,
+        null,
+        React.createElement(ThemeToggle),
+      ),
+    );
+
+    const darkBtn = screen.getByRole("button", { name: "Switch to dark mode" });
+    fireEvent.click(darkBtn);
+    await waitFor(() => {
+      expect(window.localStorage.getItem("theme")).toBe("dark");
+    });
+
+    const lightBtn = screen.getByRole("button", { name: "Switch to light mode" });
+    fireEvent.click(lightBtn);
+    await waitFor(() => {
+      expect(window.localStorage.getItem("theme")).toBe("light");
+    });
+  });
+});
+
+describe("#88 BatchUploadWizard file drop & validation errors", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("detects duplicate serial numbers and empty fields with exact line numbers", () => {
+    const csv = [
+      "serial,secret,metadata",
+      "SN-001,SEC-001,ModelA",
+      "SN-001,SEC-002,ModelA",
+      ",SEC-003,ModelB",
+    ].join("\n");
+
+    const result = validateBatchCsv(csv);
+    expect(result.errorCount).toBe(3);
+    expect(result.merkleRoot).toBeNull();
+    expect(result.rows[0]?.errors[0]).toContain("Line 2");
+    expect(result.rows[1]?.errors[0]).toContain("Line 3");
+    expect(result.rows[2]?.errors[0]).toContain("Line 4: Empty serial number");
+  });
+
+  it("handles file drop and renders validation errors in the inspect table", async () => {
+    const onCommit = vi.fn();
+    render(React.createElement(BatchUploadWizard, { onCommit }));
+
+    const csv = "serial,secret,metadata\nUNIT-1,KEY-1,Pro\nUNIT-1,KEY-2,Pro\n";
+    const file = new File([csv], "batch.csv", { type: "text/csv" });
+    const dropzone = screen.getByTestId("csv-dropzone");
+
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [file] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/validation error/i)).toBeTruthy();
+      expect(screen.getByText(/L2/)).toBeTruthy();
+      expect(screen.getByText(/L3/)).toBeTruthy();
+    });
+  });
+});
+
+describe("#89 MerkleTreeVisualizer rendering & node selection", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders tree nodes and highlights the verification path when a leaf is selected", () => {
+    const leaves = [
+      { label: "SN-A1" },
+      { label: "SN-A2" },
+      { label: "SN-A3" },
+      { label: "SN-A4" },
+    ];
+
+    const { container } = render(React.createElement(MerkleTreeVisualizer, { leaves }));
+    expect(screen.getByRole("img", { name: "Merkle tree diagram" })).toBeTruthy();
+
+    const firstLeaf = screen.getByRole("button", { name: /Select leaf SN-A1/i });
+    fireEvent.click(firstLeaf);
+
+    const highlightedNodes = container.querySelectorAll('[data-highlighted="true"]');
+    expect(highlightedNodes.length).toBe(3); // Leaf -> Internal -> Root
+    expect(screen.getByTestId("merkle-tooltip").textContent).toContain("SHA-256:");
+  });
+});
+
+describe("#101 Automated axe-core accessibility checks", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("has zero critical or serious axe-core violations on ThemeToggle, BatchUploadWizard, and MerkleTreeVisualizer", async () => {
+    const { container } = render(
+      React.createElement(
+        "main",
+        null,
+        React.createElement(ThemeToggle),
+        React.createElement(BatchUploadWizard, { onCommit: vi.fn() }),
+        React.createElement(MerkleTreeVisualizer, {
+          leaves: [{ label: "SN-1" }, { label: "SN-2" }],
+        }),
+      ),
+    );
+
+    const results = await axe.run(container);
+    const seriousOrCritical = results.violations.filter(
+      (v) => v.impact === "critical" || v.impact === "serious",
+    );
+    expect(seriousOrCritical).toEqual([]);
   });
 });
 

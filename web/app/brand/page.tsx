@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { MetricCardSkeleton } from "@/components/MetricCardSkeleton";
 import { QrCodeCard } from "@/components/QrCodeCard";
+import { TableSkeleton } from "@/components/TableSkeleton";
 import { PUBLIC_CONFIG } from "@/lib/stellar";
 import { useWallet } from "@/lib/wallet-context";
 
@@ -48,8 +50,10 @@ export default function BrandDashboardPage() {
   const [warrantyMonths, setWarrantyMonths] = useState(24);
   const [productSku, setProductSku] = useState("Chronos Diver 300M");
   const [notice, setNotice] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   const loadBrandState = useCallback(async (token: string) => {
+    setIsLoading(true);
     try {
       const [meRes, batchesRes] = await Promise.all([
         fetch(`${PUBLIC_CONFIG.apiUrl}/v1/brands/me`, {
@@ -96,6 +100,8 @@ export default function BrandDashboardPage() {
       }
     } catch {
       // Keep preview state when offline
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
@@ -266,6 +272,54 @@ export default function BrandDashboardPage() {
     setBatches((prev) => [created, ...prev]);
     setNotice(
       `Built Merkle tree for ${unitCount} units and prepared commit_batch(${created.merkleRoot.slice(0, 14)}...).`,
+    );
+  }
+
+  async function handleCsvWizardCommit(payload: BatchCommitPayload) {
+    const enc = new TextEncoder();
+    const batchDigest = await crypto.subtle.digest("SHA-256", enc.encode(payload.batchCode));
+    const batchId = Array.from(new Uint8Array(batchDigest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    if (session?.token) {
+      try {
+        const signedTxXdr = await signContractAction("commit_batch");
+        await fetch(`${PUBLIC_CONFIG.apiUrl}/v1/brands/batches`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.token}`,
+          },
+          body: JSON.stringify({
+            batchCode: payload.batchCode,
+            warrantyMonths: payload.warrantyMonths,
+            productMeta: { model: productSku, domain },
+            count: payload.units.length,
+            merkleRoot: payload.merkleRoot,
+            ...(signedTxXdr ? { signedTxXdr } : {}),
+          }),
+        });
+      } catch {
+        // Offline fallback
+      }
+    }
+
+    setBatches((prev) => [
+      {
+        batchCode: payload.batchCode,
+        batchId,
+        merkleRoot: payload.merkleRoot,
+        unitCount: payload.units.length,
+        activatedCount: 0,
+        warrantyMonths: payload.warrantyMonths,
+        recalled: false,
+      },
+      ...prev,
+    ]);
+    setVisualizedLeaves(payload.units.slice(0, 64).map((u) => ({ label: u.serial })));
+    setNotice(
+      `Committed CSV batch ${payload.batchCode} (${payload.units.length} units, root ${payload.merkleRoot.slice(0, 14)}...).`,
     );
   }
 
@@ -525,7 +579,13 @@ export default function BrandDashboardPage() {
         </div>
 
         <div className="lg:col-span-8 space-y-4">
-          {batches.map((b) => (
+          {isLoading ? (
+            <>
+              <MetricCardSkeleton count={3} />
+              <TableSkeleton rows={3} columns={4} />
+            </>
+          ) : (
+            batches.map((b) => (
             <div
               key={b.batchId}
               className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm space-y-4"
@@ -590,7 +650,8 @@ export default function BrandDashboardPage() {
                 )}
               </div>
             </div>
-          ))}
+          ))
+          )}
         </div>
       </div>
     </div>
