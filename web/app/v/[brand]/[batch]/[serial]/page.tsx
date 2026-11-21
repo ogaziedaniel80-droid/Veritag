@@ -1,4 +1,5 @@
 import { ActivationDrawer } from "@/components/ActivationDrawer";
+import { ProvenanceTimeline } from "@/components/ProvenanceTimeline";
 import { StatusBanner } from "@/components/StatusBanner";
 import { fetchUnitTimeline, getFileDownloadUrl, verifyProduct } from "@/lib/stellar";
 
@@ -107,24 +108,11 @@ export default async function PublicVerifyPage({ params }: VerifyPageProps) {
           </dl>
 
           {details.timeline.length > 0 && (
-            <div className="border-t border-slate-100 pt-4 space-y-2">
+            <div className="border-t border-slate-100 pt-4 space-y-3">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
                 On-Chain Provenance Timeline
               </h3>
-              <ul className="space-y-1.5 text-xs">
-                {details.timeline.map((ev) => (
-                  <li
-                    key={ev.id}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2"
-                  >
-                    <span className="font-mono font-semibold text-slate-800">{ev.type}</span>
-                    <span className="font-mono text-slate-500">
-                      Tx: {ev.txHash.slice(0, 12)}... ·{" "}
-                      {ev.finalized ? "Finalized" : "Pending Finality"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <ProvenanceTimeline events={details.timeline} />
             </div>
           )}
 

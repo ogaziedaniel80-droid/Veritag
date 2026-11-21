@@ -1,3 +1,4 @@
+import { AlertService } from "./alerts.js";
 import { IndexerPoller, RpcEventsProvider } from "./poller.js";
 import { InMemoryIndexerWriter, PostgresIndexerWriter } from "./writer.js";
 
@@ -9,10 +10,12 @@ const databaseUrl =
 const pollIntervalMs = Number(process.env.INDEXER_POLL_INTERVAL_MS ?? 5000);
 const confirmationLedgers = Number(process.env.INDEXER_CONFIRMATION_LEDGERS ?? 2);
 
+const alertService = new AlertService();
+
 const writer =
   process.env.USE_IN_MEMORY_DB === "true"
-    ? new InMemoryIndexerWriter()
-    : new PostgresIndexerWriter(databaseUrl);
+    ? new InMemoryIndexerWriter(alertService)
+    : new PostgresIndexerWriter(databaseUrl, alertService);
 
 const provider = new RpcEventsProvider(rpcUrl);
 const poller = new IndexerPoller({

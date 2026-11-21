@@ -1,5 +1,6 @@
 import pg from "pg";
 import type { DecodedRegistryEvent } from "./decoder.js";
+import { AlertService, type AlertContext } from "./alerts.js";
 
 export interface IndexerCursorState {
   lastLedger: number;
@@ -16,7 +17,12 @@ export interface IndexerWriter {
 const DEFAULT_STREAM_ID = "soroban-registry";
 
 export class InMemoryIndexerWriter implements IndexerWriter {
+  private readonly alerts?: AlertService;
   private readonly cursors = new Map<string, IndexerCursorState>();
+
+  constructor(alerts?: AlertService) {
+    this.alerts = alerts;
+  }
   public readonly events = new Map<
     string,
     { event: DecodedRegistryEvent; finalized: boolean }
@@ -161,6 +167,21 @@ export class InMemoryIndexerWriter implements IndexerWriter {
         break;
     }
 
+    if (this.alerts && (event.type === "batch_recalled" || event.type === "unit_flagged")) {
+      const ctx: AlertContext = {};
+      if (event.type === "batch_recalled") {
+        const brandInfo = this.brands.get(event.brand);
+        ctx.brandDomain = brandInfo?.domain;
+      } else if (event.type === "unit_flagged") {
+        const unit = this.units.get(event.unitId);
+        if (unit) {
+          const brandInfo = this.brands.get(unit.brand);
+          ctx.brandDomain = brandInfo?.domain;
+        }
+      }
+      await this.alerts.dispatchAlert(event, ctx);
+    }
+
     return { applied: true };
   }
 
@@ -178,12 +199,14 @@ export class InMemoryIndexerWriter implements IndexerWriter {
 
 export class PostgresIndexerWriter implements IndexerWriter {
   private readonly pool: pg.Pool;
+  private readonly alerts?: AlertService;
 
-  constructor(databaseUrlOrPool: string | pg.Pool) {
+  constructor(databaseUrlOrPool: string | pg.Pool, alerts?: AlertService) {
     this.pool =
       typeof databaseUrlOrPool === "string"
         ? new pg.Pool({ connectionString: databaseUrlOrPool })
         : databaseUrlOrPool;
+    this.alerts = alerts;
   }
 
   async close(): Promise<void> {
@@ -378,6 +401,25 @@ export class PostgresIndexerWriter implements IndexerWriter {
       }
 
       await client.query("COMMIT");
+
+      if (this.alerts && (event.type === "batch_recalled" || event.type === "unit_flagged")) {
+        const ctx: AlertContext = {};
+        if (event.type === "batch_recalled") {
+          const dr = await this.pool.query(
+            "SELECT domain FROM brands WHERE address = $1",
+            [event.brand],
+          );
+          ctx.brandDomain = dr.rows[0]?.domain as string | undefined;
+        } else if (event.type === "unit_flagged") {
+          const dr = await this.pool.query(
+            "SELECT b.domain FROM units u JOIN brands b ON u.brand = b.address WHERE u.unit_id = $1",
+            [event.unitId],
+          );
+          ctx.brandDomain = dr.rows[0]?.domain as string | undefined;
+        }
+        await this.alerts.dispatchAlert(event, ctx);
+      }
+
       return { applied: true };
     } catch (err) {
       await client.query("ROLLBACK");
